@@ -4,125 +4,87 @@
 
 # wraps all functions together to reformat data
 # timepoint_platform should be a string with the format: 'T2_4plex'
-reformatRawData <- function(timepoint_platform, 
+reformatRawData <- function(path, 
                             plasma # dataframe with plasma availability
                             ) {
-    #timepoint_platform <- "T4_4plex"
+    # for testing
+    path <- "data-raw/T2_6plex"
+    plasma <- plasma
     
-    data_list <- importDataAsList(timepoint_platform, "\\.csv") %>%
-        lapply(renameCHI3L1) %>%
-        lapply(renameIL1B) %>%
-        lapply(renameTNFa) %>%
-        lapply(changeNaNtoNA) %>%
-        lapply(addBatchDateAnalytes) %>%
-        lapply(subsetAndCombineData) %>%
+    # import all csv in path as data frames into a list
+    data_list <- importDataAsList(path, "\\.csv") %>%
+        # standardize spelling of analytes
+        lapply(function(df) df %>% 
+                   # correct all misspellings of CHI3L1 to 'CHI3L1'
+                   mutate_all(str_replace_all, "CH.*L1$", "CHI3L1") %>%
+                   # make capitalization uniform for IL-1B
+                   mutate_all(str_replace_all, "IL-1b", "IL-1B") %>%
+                   # make all variations of TNF-a uniform
+                   mutate_all(str_replace_all, "TNF.*a$", "TNF-a")
+               ) %>%
+        # change all NaN to NA in dataframe
+        lapply(function(df) mutate_all(df, ~ifelse(is.nan(.), NA, .))) %>%
+        lapply(extractBatchDateAnalytes) %>%
+        lapply(subsetAndCombineData) %>% # left off here 6/12/2026
         lapply(filter, specimenID != 'blank') %>%
         lapply(addTimePointCol, plasma) %>%
         lapply(rename, dilution_factor = 'Dilution Factor') %>%
         lapply(compareSampleToStd) %>%
-        lapply(changeNaNtoNA)
+        # change all NaN to NA in dataframe
+        lapply(function(df) mutate_all(df, ~ifelse(is.nan(.), NA, .)))
     
-    
-    #check <- data_list[[1]]
+    check <- data_list[[1]]
 }
 
-# import all data within directory into a list of dataframes - **edit this later to give the option of adding column with file name or not**
+# import all data within directory into a list of data frames with file names
 importDataAsList <- function(directory, file_extension) {
-    # directory <- 'T4_4plex'
+    
+    # for testing
+    # directory <- 'data-raw/T2_3plex'
     # file_extension <- '\\.csv'
     
     # save .csv file names as list
     file_names <- list.files(path = directory, pattern = file_extension, full.names = TRUE)
     
-    # Pick on of the options below (comment out unused line)
-    # import all data csv files into list of data frames with column that contains file names
-    data_in_list <- lapply(file_names, addColWithFileName)
-    
-    # # import all data csv files into list of data frames without column that contains file names
-    # data_in_list <- lapply(file_names, read.csv)
-}
-
-# Function that adds original .csv file name as column in dataframe 
-addColWithFileName <- function(x) {
-    #x <- file_names[[2]]
-    
-    df_with_filename <- read.csv(x) %>%
-        mutate(file_name = x)
-}
-
-# Correct all misspellings of CHI3L1 to 'CHI3L1'
-renameCHI3L1 <- function(df) {
-    return <- df %>%
-        mutate_all(stringr::str_replace_all, "CH.*L1$", "CHI3L1")# matches any string beginning with "CH" and ending with "L1"
-}
-
-# function to make capitalization uniform for IL-1B
-renameIL1B <- function(df) {
-    return <- df %>%
-        mutate_all(stringr::str_replace_all, "IL-1b", "IL-1B")# matches any string beginning with "CH" and ending with "L1"
-}
-
-# function to make all variations of TNF-a uniform
-renameTNFa <- function(df) {
-    return <- df %>%
-        mutate_all(stringr::str_replace_all, "TNF.*a$", "TNF-a")# matches any string beginning with "CH" and ending with "L1"
-}
-
-# change all NaN to NA in dataframe
-changeNaNtoNA <- function(df) {
-    #df <- data_list[[9]]
-    
-    df_changed <- df %>% mutate_all(~ifelse(is.nan(.), NA, .))
+    # import all data csv files into list of data frames
+    data_in_list <- lapply(file_names,
+                           # add original .csv file name as column in dataframe 
+                           function(x) read.csv(x) %>% mutate(file_name = x)
+                           )
 }
 
 # Function that adds column populated with batch name(plate name) to each data file
-# Reference: https://stackoverflow.com/questions/17499013/how-do-i-make-a-list-of-data-frames
-addBatchDateAnalytes <- function(df) {
-    # find rows that contain batch date and name
-    batch_row <- filter(df, Program == "Batch")
-    date_row <- filter(df, Program == "Date")
+extractBatchDateAnalytes <- function(df) {
     
-    # obtain batch name from xPONENT column from row found above
-    batch_name <- batch_row$xPONENT
-    date <- date_row$xPONENT
+    # # for testing
+    # df <- check
     
-    # extract analyte names and put into string
-    analyte_names <- extractAnalyteNames(df) %>%
-        toString()
+    # extract batch name and date of run as strings (values in 'xPONENT' column)
+    batch_name <- filter(df, Program == "Batch") %>% pull(xPONENT)
+    date_run <- filter(df, Program == "Date") %>% pull(xPONENT)
     
-    # create new df with added columns populated with batch name and date
-    batch_added <- df %>% 
-        mutate(Batch = batch_name, .before = Program)
+    # create string that contains analyte names, separated by commas
+    analyte_names <- df %>%
+        # analyte names stored in rows where column 'Program' == 'Sample'
+        filter(Program == 'Sample') %>%
+        # remove row name ('Sample') and file name
+        select(-c(Program, file_name)) %>%
+        # change any empty strings to NA
+        mutate_all(list(~ na_if(., ''))) %>%
+        # remove empty NA columns
+        remove_empty('cols') %>%
+        # keep first row
+        slice(1) %>%
+        # convert row into vector
+        unlist(.) %>%
+        # combine analyte names in vector into one string, separated by commas
+        toString(.)
     
-    date_added <- batch_added %>% 
-        mutate(Date = date, .before = Batch)
-    
-    analytes_added <- date_added %>%
-        mutate(analytes = paste0('analytes_', analyte_names))
-}
-
-# Function to create vector with analyte names found in RAW output data file
-extractAnalyteNames <- function(df) {
-    # df <- unmanipulated output file from xPONENT software
-    
-    # subset rows that contain protein names 
-    subset_rows <- subset(df, subset = Program == "Sample")
-    
-    # convert first row of dataframe to vector
-    row_as_vector <- unname(unlist(subset_rows[1,]))
-    
-    # find index for name of first protein (located after "Sample")
-    first_index <- match("Sample", row_as_vector) + 1
-    
-    # find index for name of last analyte (located before "Total Events", before first NA, or before first empty string, depending on input dataframe format)
-    ifelse(!is.na(match("Total Events", row_as_vector)), # if "Total Events" is found in vector
-           (last_index <- match("Total Events", row_as_vector) - 1), # then find index of "Total Events"
-           ifelse(anyNA(row_as_vector), # if the row contains any NA's
-                  (last_index <- first(which(is.na(row_as_vector))) - 1), # then, find index of first NA
-                  (last_index <- first(which(row_as_vector == "")) - 1))) # else, find index of first empty string
-    
-    # store protein names in vector
-    names <- row_as_vector[first_index:last_index]
+    # return df with added columns describing batch, date, and analyte names
+    df %>% 
+        mutate(batch = batch_name,
+               date = date_run,
+               analytes = analyte_names)
 }
 
 # Function that creates single dataframe containing all desired data types
@@ -131,7 +93,8 @@ subsetAndCombineData <- function(df) {
     
     # create a dataframe with specified data type (net MFI) for standards and samples for all analytes
     net_mfi <- df %>%
-        changeBlanksToNA() %>%
+        # change all blank cells in data frame to NA
+        mutate_all(na_if, "") %>%
         subsetDataType("Net MFI") %>%
         janitor::remove_empty("cols") %>%
         janitor::row_to_names(row_number = 2) %>%
@@ -144,7 +107,7 @@ subsetAndCombineData <- function(df) {
     
     # create a dataframe with specified data type (expected concentration) of standards for all analytes
     exp_std_conc <- df %>%
-        changeBlanksToNA() %>%
+        mutate_all(na_if, "") %>%
         subsetDataType("Standard Expected Concentration") %>%
         janitor::remove_empty("cols") %>%
         janitor::row_to_names(row_number = 2) %>%
@@ -156,7 +119,7 @@ subsetAndCombineData <- function(df) {
     
     # create a dataframe with specified data type (%CV replicates) of standards and samples for all analytes
     cv <- df %>%
-        changeBlanksToNA() %>%
+        mutate_all(na_if, "") %>%
         subsetDataType("%CV Replicates") %>%
         remove_empty("cols") %>%
         row_to_names(row_number = 2) %>%
@@ -167,7 +130,7 @@ subsetAndCombineData <- function(df) {
     
     # create a dataframe with specified data type (dilution factor) of samples for all analytes
     dilution_factor <- df %>%
-        changeBlanksToNA() %>%
+        mutate_all(na_if, "") %>%
         subsetDataType("Dilution Factor") %>%
         janitor::remove_empty("cols") %>%
         janitor::row_to_names(row_number = 2) %>%
@@ -194,12 +157,6 @@ subsetAndCombineData <- function(df) {
     return(merged)
     
     #check <- merged0[[1]]
-}
-
-# Function that changes all blank cells in dataframe to NA
-changeBlanksToNA <- function(df) {
-    df %>%
-        mutate_all(na_if, "")
 }
 
 #function that subsets specified data type from each plate's output file. Input dataframe must have NA in the place of any blank cells
@@ -322,7 +279,7 @@ createLowestStdVar <- function(df){
     rows_with_stds <- with(df, grepl('Standard', specimenID))
     
     lowest_std <- df %>%
-        changeNaNtoNA() %>%
+        mutate_all(~ifelse(is.nan(.), NA, .)) %>%
         filter(rows_with_stds) %>%
         select('net_mfi') %>%
         tidyr::drop_na() %>%
@@ -418,3 +375,67 @@ subsetAnalyte <- function(df, plate_data) {
         #rename_at(vars(contains(analyte_name)), ~ str_replace(., paste0(analyte_name, "_"), "")) %>%
         mutate(analyte = analyte_name)
 }
+
+### REMOVE THESE FUNCTIONS #####################################################
+# Function that adds original .csv file name as column in dataframe 
+# addColWithFileName <- function(x) {
+#     #x <- file_names[[2]]
+#     
+#     df_with_filename <- read.csv(x) %>%
+#         mutate(file_name = x)
+# }
+
+# # Correct all misspellings of CHI3L1 to 'CHI3L1'
+# renameCHI3L1 <- function(df) {
+#     return <- df %>%
+#         mutate_all(stringr::str_replace_all, "CH.*L1$", "CHI3L1")# matches any string beginning with "CH" and ending with "L1"
+# }
+
+# # function to make capitalization uniform for IL-1B
+# renameIL1B <- function(df) {
+#     return <- df %>%
+#         mutate_all(stringr::str_replace_all, "IL-1b", "IL-1B")# matches any string beginning with "CH" and ending with "L1"
+# }
+
+# # function to make all variations of TNF-a uniform
+# renameTNFa <- function(df) {
+#     return <- df %>%
+#         mutate_all(stringr::str_replace_all, "TNF.*a$", "TNF-a")# matches any string beginning with "CH" and ending with "L1"
+# }
+
+# # change all NaN to NA in dataframe
+# changeNaNtoNA <- function(df) {
+#     #df <- data_list[[9]]
+#     
+#     df_changed <- df %>% mutate_all(~ifelse(is.nan(.), NA, .))
+# }
+
+# # Function that changes all blank cells in dataframe to NA
+# changeBlanksToNA <- function(df) {
+#     df %>%
+#         mutate_all(na_if, "")
+# }
+
+# # Function to create vector with analyte names found in RAW output data file
+# extractAnalyteNames <- function(df) {
+#     
+#     # for testing
+#     #df <- check # unmanipulated output file from xPONENT software
+#     
+#     # create string that contains analyte names, separated by commas
+#     df %>%
+#         # analyte names stored in rows where column 'Program' == 'Sample'
+#         filter(Program == 'Sample') %>%
+#         # remove row name ('Sample') and file name
+#         select(-c(Program, file_name)) %>%
+#         # change any empty strings to NA
+#         mutate_all(list(~ na_if(., ''))) %>%
+#         # remove empty NA columns
+#         remove_empty('cols') %>%
+#         # keep first row
+#         slice(1) %>%
+#         # convert row into vector
+#         unlist(.) %>%
+#         # combine analyte names in vector into one string, separated by commas
+#         toString(.)
+# }
