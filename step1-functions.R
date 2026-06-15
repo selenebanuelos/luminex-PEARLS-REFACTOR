@@ -24,9 +24,11 @@ reformatRawData <- function(path,
                ) %>%
         # change all NaN to NA in dataframe
         lapply(function(df) mutate_all(df, ~ifelse(is.nan(.), NA, .))) %>%
+        # extract batch name, run date, and analyte information
         lapply(extractBatchDateAnalytes) %>%
-        lapply(subsetAndCombineData) %>% # left off here 6/12/2026
-        lapply(filter, specimenID != 'blank') %>%
+        # extract net mfi, %CV, std concentration, and dilution factor data
+        lapply(extractAndCombineData) %>% 
+        lapply(filter, specimenID != 'blank') %>% # left off here 6/15/2026
         lapply(addTimePointCol, plasma) %>%
         lapply(rename, dilution_factor = 'Dilution Factor') %>%
         lapply(compareSampleToStd) %>%
@@ -82,104 +84,104 @@ extractBatchDateAnalytes <- function(df) {
     
     # return df with added columns describing batch, date, and analyte names
     df %>% 
+        # add in descriptive suffix for downstream data manipulation
         mutate(batch = batch_name,
                date = date_run,
-               analytes = analyte_names)
+               analytes = analyte_names
+               )
 }
 
 # Function that creates single dataframe containing all desired data types
-subsetAndCombineData <- function(df) {
-    #df <- t2_3plex_list[[7]]
+extractAndCombineData <- function(df) {
+    
+    # # for testing
+    # df <- check
+    
+    # column names of file name, batch, date, analyte data
+    info_vars <- c('file_name', 'batch', 'date', 'analytes')
+    
+    # separate run info from data
+    info <- select(df, all_of(info_vars))
+    data <- select(df, -info_vars) %>% 
+        # change any empty strings to NA
+        mutate_all(na_if, '') 
+    
+    # function that subsets specified data type from each plate's raw file 
+    # Input dataframe must have NA in the place of any blank cells
+    extractDataType <- function(df, # data frame
+                                data_type # data type as string
+                                ) {
+        # get row number of last plate_data$xPONENT=NA before plate_data$xPONENT="Net MFI"
+        last_na_before_data_type <- max(which(is.na(df$xPONENT))[which(is.na(df$xPONENT)) < which(df$xPONENT == data_type)])
+        
+        # get row number of first row that contains NA in columns 1 and 2 after xPONENT=data_type
+        first_na_after_data_type <- min(which(is.na(df$Program))[which(is.na(df$Program)) > which(df$xPONENT == data_type)])
+        
+        # all rows to remove 
+        remove_rows <- c(seq(1:last_na_before_data_type), 
+                         seq(first_na_after_data_type, nrow(df))
+                         )
+        
+        # new dataframe without rows selected in step above
+        df[-remove_rows, ] %>%
+            # remove columns with no data
+            remove_empty("cols") %>%
+            # use second row as variable names (first row just specifies data type)
+            row_to_names(row_number = 2)
+            
+    }
     
     # create a dataframe with specified data type (net MFI) for standards and samples for all analytes
-    net_mfi <- df %>%
-        # change all blank cells in data frame to NA
-        mutate_all(na_if, "") %>%
-        subsetDataType("Net MFI") %>%
-        janitor::remove_empty("cols") %>%
-        janitor::row_to_names(row_number = 2) %>%
-        rename(date = 1, batch = 2) %>%
-        rename_at( vars( contains("analytes_") ), list( ~paste0("analytes"))) %>%
-        mutate_all(~gsub("analytes_", "", .)) %>%
-        rename_at( vars( contains(".csv") ), list( ~paste0("file_name"))) %>%
+    net_mfi <- data %>%
+        # extract rows that contain Net MFI-related data
+        extractDataType("Net MFI") %>%
+        # remove unecessary Total Events column
         select(-'Total Events')
     
-    
     # create a dataframe with specified data type (expected concentration) of standards for all analytes
-    exp_std_conc <- df %>%
-        mutate_all(na_if, "") %>%
-        subsetDataType("Standard Expected Concentration") %>%
-        janitor::remove_empty("cols") %>%
-        janitor::row_to_names(row_number = 2) %>%
-        rename(date = 1, batch = 2) %>%
-        rename_at( vars( contains("analytes_") ), list( ~paste0("analytes"))) %>%
-        mutate_all(~gsub("analytes_", "", .)) %>%
-        rename_at( vars( contains(".csv") ), list( ~paste0("file_name"))) %>%
+    exp_std_conc <- data %>%
+        extractDataType('Standard Expected Concentration') %>%
+        # remove unecessary Reagent column
         rename(Sample = "Reagent")
     
     # create a dataframe with specified data type (%CV replicates) of standards and samples for all analytes
-    cv <- df %>%
-        mutate_all(na_if, "") %>%
-        subsetDataType("%CV Replicates") %>%
-        remove_empty("cols") %>%
-        row_to_names(row_number = 2) %>%
-        rename(date = 1, batch = 2) %>%
-        rename_at( vars( contains("analytes_") ), list( ~paste0("analytes"))) %>%
-        mutate_all(~gsub("analytes_", "", .)) %>%
-        rename_at( vars( contains(".csv") ), list( ~paste0("file_name")))
+    cv <- data %>%
+        extractDataType('%CV Replicates')
     
     # create a dataframe with specified data type (dilution factor) of samples for all analytes
-    dilution_factor <- df %>%
-        mutate_all(na_if, "") %>%
-        subsetDataType("Dilution Factor") %>%
-        janitor::remove_empty("cols") %>%
-        janitor::row_to_names(row_number = 2) %>%
-        rename(date = 1, batch = 2) %>%
-        rename_at( vars( contains("analytes_") ), list( ~paste0("analytes"))) %>%
-        mutate_all(~gsub("analytes_", "", .)) %>%
-        rename_at( vars( contains(".csv") ), list( ~paste0("file_name"))) %>%
-        replace(is.na(.), 0) %>%# replace NA in dilution factor column for standards with 1 since they are undiluted
+    dilution_factor <- data %>%
+        extractDataType("Dilution Factor") %>%
+        # replace NA in dilution factor column for standards with 1 since they are undiluted
+        replace(is.na(.), 0) %>% 
+        # rename specimenID for donwstream joining
         rename(specimenID = Sample)
     
-    # merge all dataframes from above into one, adding data type as suffix for each variable
-    merged0 <- lst(net_mfi, exp_std_conc, cv) %>%
-        imap(addDfNameAsSuffix) %>%
-        reduce(full_join, by = c('date', 'batch', "Sample", 'file_name', 'analytes')) %>% 
-        rename(Location = Location_net_mfi, specimenID = Sample) %>%
-        full_join(., dilution_factor, by = c('date', 'batch', 'specimenID', 'Location', 'file_name', 'analytes')) %>%
+    # merge all dataframes from above into one
+    merged <- lst(net_mfi, exp_std_conc, cv) %>%
+        # add data frame names as suffix to all variables except 'Sample'
+        imap(function(df, df_name) rename_with(df, 
+                                               ~paste(., df_name, sep = '_'), 
+                                               -c('Sample'))) %>%
+        # join net mfi, standards, and %CV data together
+        reduce(full_join, by = 'Sample') %>% 
+        # rename location and sample variables for downstream joining
+        rename(Location = Location_net_mfi, 
+               specimenID = Sample) %>%
+        # join with dilution factor data
+        full_join(dilution_factor, 
+                  by = c('specimenID', 'Location')) %>%
+        # change specific variables into numeric class
         mutate_at(names(.) %>%
-                      .[! . %in% c('date', 'batch', 'specimenID', 'Location', 'file_name', 'analytes')], as.numeric) # convert numbers in df from characters to numeric class (need to do for model fitting). all columns except "Sample" col contain only numbers
-    
-    # remove background data 
-    merged <- merged0 %>%
-        filter(specimenID != 'Background0')
+                      .[! . %in% c('specimenID', 'Location')], 
+                  as.numeric) %>%
+        # remove background data
+        filter(specimenID != 'Background0') %>%
+        # add in run info back into data
+        cbind(., slice(info, 1:nrow(.)))
     
     return(merged)
     
     #check <- merged0[[1]]
-}
-
-#function that subsets specified data type from each plate's output file. Input dataframe must have NA in the place of any blank cells
-#Reference: https://stackoverflow.com/questions/48275128/how-to-filter-rows-between-two-specific-values
-# df = imported raw data
-# data_type = data type of interest you want to contain in new data frame
-subsetDataType <- function(df, data_type) {
-    # get row number of last plate_data$xPONENT=NA before plate_data$xPONENT="Net MFI"
-    last_na_before_data_type <- max(which(is.na(df$xPONENT))[which(is.na(df$xPONENT)) < which(df$xPONENT == data_type)])
-    
-    # get row number of first row that contains NA in columns 1 and 2 after xPONENT=data_type
-    first_na_after_data_type <- min(which(is.na(df$Program))[which(is.na(df$Program)) > which(df$xPONENT == data_type)])
-    
-    # all rows to remove 
-    remove_rows <- c(seq(1:last_na_before_data_type), seq(first_na_after_data_type, nrow(df)))
-    
-    # create new dataframe without rows selected in step above
-    new_df <- df[-remove_rows, ]
-}
-
-#Reference: https://stackoverflow.com/questions/65152352/suffixes-when-merging-more-than-two-data-frames-with-full-join
-addDfNameAsSuffix <- function(x, y) {
-    x %>% rename_with(~paste(., y, sep = '_'), -c('Sample', 'date', 'batch', 'file_name', 'analytes'))
 }
 
 # Merge visit number to cleaned data by specimen ID. 
